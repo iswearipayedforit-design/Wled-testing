@@ -15,13 +15,37 @@ Custom OTA build for classic ESP32 based on upstream WLED `v0.15.1`.
 - Full wipe duration: 2500 ms
 - Debounce: 50 ms
 
-## FlowButton behavior
+## FlowButton controls
 
-A press starts a wipe from logical LED 0 toward LED 96. The currently rendered WLED output is revealed, so Solid uses the currently selected color/brightness and AudioReactive effects remain AudioReactive.
+### Single click
 
-When all LEDs are on, the next press wipes OFF in the opposite direction (LED 96 back toward LED 0). When the wipe finishes, WLED is switched fully off.
+Starts the smooth wipe ON from logical LED 0 to LED 96. When the lamp is already on, a single click wipes OFF in the opposite direction. A click during a running wipe reverses direction from the current position.
 
-If the button is pressed during a wipe, direction reverses immediately from the current position, without blocking the WLED loop.
+Because the same button also supports double-click, the single-click action is confirmed after a 350 ms double-click window.
+
+### Hold
+
+After 600 ms the global brightness moves through a closed loop in 10 percentage-point steps. While the button remains held, another step is applied every 450 ms:
+
+`100 -> 90 -> 80 -> 70 -> 60 -> 50 -> 40 -> 30 -> 20 -> 10 -> 100 -> ...`
+
+Holding while the lamp is OFF turns it on at the next brightness step so the change is immediately visible.
+
+### Double click
+
+Cycles the CCT temperature through six useful white points, from very warm to cool daylight:
+
+`2200 K -> 2700 K -> 3200 K -> 4000 K -> 5000 K -> 6500 K -> 2200 K -> ...`
+
+The CCT selection is applied to every active segment so both physical CCT LED buses stay matched.
+
+### Memory
+
+FlowButton remembers the last non-zero brightness and the last CCT selection. Changes made from the WLED UI or presets are also learned. The remembered values are saved to WLED `cfg.json` after changes settle, so they survive reboot without repeatedly writing flash during a button hold.
+
+## Effects
+
+The wipe is an overlay over WLED's normal rendering. Solid uses the selected CCT/brightness, and AudioReactive effects continue rendering normally. While a wipe is active, FlowButton forces normal animation frames so Solid does not update in large 350 ms jumps.
 
 ## OTA
 
