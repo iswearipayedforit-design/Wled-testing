@@ -21,31 +21,35 @@ Custom OTA build for classic ESP32 based on upstream WLED `v0.15.1`.
 
 Starts the smooth wipe ON from logical LED 0 to LED 96. When the lamp is already on, a single click wipes OFF in the opposite direction. A click during a running wipe reverses direction from the current position.
 
-Because the same button also supports double-click, the single-click action is confirmed after a 350 ms double-click window.
+Because the same button also supports double-click, the single-click action is confirmed after a 450 ms double-click window.
 
 ### Hold
 
-After 600 ms the global brightness moves through a closed loop in 10 percentage-point steps. While the button remains held, another step is applied every 450 ms:
+After 600 ms the global brightness begins moving through this closed dimming loop:
 
-`100 -> 90 -> 80 -> 70 -> 60 -> 50 -> 40 -> 30 -> 20 -> 10 -> 100 -> ...`
+`90% -> 60% -> 30% -> 10% -> 2% -> 90% -> ...`
 
-Holding while the lamp is OFF turns it on at the next brightness step so the change is immediately visible.
+If the current brightness is above or between these values, the first hold step chooses the next lower value. Another step is applied every 1000 ms while the button remains held.
+
+Each brightness change bypasses the normal WLED transition delay and forces an immediate render, just like the wipe animation.
 
 ### Double click
 
-Cycles the CCT temperature through six useful white points, from very warm to cool daylight:
+Cycles through six white-color presets:
 
-`2200 K -> 2700 K -> 3200 K -> 4000 K -> 5000 K -> 6500 K -> 2200 K -> ...`
+`2200 K eq. -> 2700 K eq. -> 3200 K eq. -> 4000 K eq. -> 5000 K eq. -> 6500 K eq. -> ...`
 
-The CCT selection is applied to every active segment so both physical CCT LED buses stay matched.
+These are no longer applied using WLED's `setCCT()` value. Instead, FlowButton converts the chosen white temperature to the corresponding RGB color-wheel value and lets WLED's **CCT from RGB** path derive the warm/cold channel ratio. This matches the physical behavior seen when changing the color manually in Solid.
+
+The change is followed by an immediate forced render so it should be visible without waiting for Solid's normal refresh interval.
 
 ### Memory
 
-FlowButton remembers the last non-zero brightness and the last CCT selection. Changes made from the WLED UI or presets are also learned. The remembered values are saved to WLED `cfg.json` after changes settle, so they survive reboot without repeatedly writing flash during a button hold.
+FlowButton remembers the last non-zero brightness and the last white preset. Changes made from the WLED UI or presets are also learned. The remembered values are saved to WLED `cfg.json` after changes settle, so they survive reboot without repeatedly writing flash during a button hold.
 
 ## Effects
 
-The wipe is an overlay over WLED's normal rendering. Solid uses the selected CCT/brightness, and AudioReactive effects continue rendering normally. While a wipe is active, FlowButton forces normal animation frames so Solid does not update in large 350 ms jumps.
+The wipe is an overlay over WLED's normal rendering. AudioReactive effects continue rendering normally. While a wipe is active, FlowButton forces normal animation frames so Solid does not update in large 350 ms jumps.
 
 ## OTA
 
