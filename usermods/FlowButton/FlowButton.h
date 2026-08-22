@@ -28,6 +28,7 @@ private:
     if (direction != 0) {
       direction = -direction;          // reverse immediately from current position
       lastAnimMs = now;
+      strip.trigger();                 // render the new direction immediately
       return;
     }
 
@@ -45,6 +46,7 @@ private:
     }
 
     lastAnimMs = now;
+    strip.trigger();
   }
 
   void updateAnimation()
@@ -53,7 +55,10 @@ private:
 
     const uint32_t now = millis();
     uint32_t dt = now - lastAnimMs;
-    if (dt == 0) return;
+    if (dt == 0) {
+      strip.trigger();
+      return;
+    }
     lastAnimMs = now;
 
     const float ledsPerMs = (float)FLOW_LED_COUNT / (float)FLOW_DURATION_MS;
@@ -62,6 +67,7 @@ private:
     if (progress >= (float)FLOW_LED_COUNT) {
       progress = (float)FLOW_LED_COUNT;
       direction = 0;
+      strip.trigger();
       return;
     }
 
@@ -75,8 +81,18 @@ private:
         bri = 0;
         stateChanged = true;
         stateUpdated(CALL_MODE_BUTTON);
+      } else {
+        strip.trigger();
       }
+      return;
     }
+
+    // Critical for smooth FlowButton animation:
+    // effects such as Solid normally render only every 350 ms in WLED 0.15.1.
+    // trigger() forces the next frame to be computed on all active segments,
+    // so the overlay follows progress at WLED's normal frame rate instead of
+    // jumping by many LEDs at a time.
+    strip.trigger();
   }
 
 public:
@@ -118,17 +134,34 @@ public:
     return true;
   }
 
-  // WLED renders the current effect normally; this overlay only masks the
-  // portion that has not yet been reached by the wipe. This means Solid,
-  // palettes and AudioReactive effects all keep their native appearance.
+  // WLED renders the current effect normally; this overlay masks the portion
+  // that has not yet been reached by the wipe. A fractional boundary pixel is
+  // brightness-scaled to make the moving edge visually smoother.
   void handleOverlayDraw() override
   {
     if (!initialized) return;
 
-    uint16_t visible = (uint16_t)progress;
-    if (visible > FLOW_LED_COUNT) visible = FLOW_LED_COUNT;
+    float p = progress;
+    if (p < 0.0f) p = 0.0f;
+    if (p > (float)FLOW_LED_COUNT) p = (float)FLOW_LED_COUNT;
 
-    for (uint16_t i = visible; i < FLOW_LED_COUNT; i++) {
+    const uint16_t fullVisible = (uint16_t)p;
+    const float fraction = p - (float)fullVisible;
+
+    // Smooth the boundary LED between black and the effect's rendered color.
+    if (fullVisible < FLOW_LED_COUNT && fraction > 0.0f) {
+      const uint32_t c = strip.getPixelColor(fullVisible);
+      const uint16_t a = (uint16_t)(fraction * 255.0f);
+      strip.setPixelColor(fullVisible, RGBW32(
+        ((uint16_t)R(c) * a) / 255,
+        ((uint16_t)G(c) * a) / 255,
+        ((uint16_t)B(c) * a) / 255,
+        ((uint16_t)W(c) * a) / 255
+      ));
+    }
+
+    const uint16_t firstHidden = fullVisible + ((fraction > 0.0f) ? 1 : 0);
+    for (uint16_t i = firstHidden; i < FLOW_LED_COUNT; i++) {
       strip.setPixelColor(i, 0);
     }
   }
