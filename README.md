@@ -35,13 +35,17 @@ Each brightness change bypasses the normal WLED transition delay and forces an i
 
 ### Double click
 
-Cycles through six white-color presets:
+Cycles through five deliberately strong white presets:
 
-`2200 K eq. -> 2700 K eq. -> 3200 K eq. -> 4000 K eq. -> 5000 K eq. -> 6500 K eq. -> ...`
+1. Very warm — red/orange wheel tint + 1900 K CCT
+2. Warm — amber/orange wheel tint + 2600 K CCT
+3. Neutral — warm-neutral wheel tint + 3500 K CCT
+4. Cool — blue-white wheel tint + 5500 K CCT
+5. Very cool — strong blue wheel tint + 10000 K CCT
 
-These are no longer applied using WLED's `setCCT()` value. Instead, FlowButton converts the chosen white temperature to the corresponding RGB color-wheel value and lets WLED's **CCT from RGB** path derive the warm/cold channel ratio. This matches the physical behavior seen when changing the color manually in Solid.
+Each preset sets **both** the primary color-wheel value and the CCT slider value. This reproduces the stronger manual combinations possible in WLED (for example red/orange plus maximum warm CCT) instead of relying on CCT or RGB alone.
 
-The change is followed by an immediate forced render so it should be visible without waiting for Solid's normal refresh interval.
+The change is followed by an immediate forced render so it is visible without waiting for Solid's normal refresh interval.
 
 ### Memory
 
