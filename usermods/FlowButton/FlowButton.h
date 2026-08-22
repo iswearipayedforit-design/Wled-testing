@@ -16,6 +16,7 @@ private:
   static constexpr uint16_t LONG_PRESS_MS = 600;
   static constexpr uint16_t HOLD_REPEAT_MS = 1000;
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
+  static constexpr uint8_t WHITE_PRESET_COUNT = 5;
 
   // Wipe state
   float progress = 0.0f;              // visible LEDs, 0.0 .. FLOW_LED_COUNT
@@ -35,7 +36,7 @@ private:
 
   // Remembered user settings. lastBrightness is always non-zero.
   uint8_t lastBrightness = 255;
-  uint8_t whiteIndex = 2;              // default 3200 K equivalent
+  uint8_t whiteIndex = 2;              // default neutral preset
   bool configLoaded = false;
   bool persistPending = false;
   uint32_t persistAfterMs = 0;
@@ -44,14 +45,39 @@ private:
 
   uint16_t whiteKelvin(uint8_t index) const
   {
-    // Six useful white points from very warm to cool daylight.
-    switch (index % 6) {
-      case 0: return 2200;
-      case 1: return 2700;
-      case 2: return 3200;
-      case 3: return 4000;
-      case 4: return 5000;
-      default: return 6500;
+    // CCT part of each combined RGB+CCT preset.
+    switch (index % WHITE_PRESET_COUNT) {
+      case 0: return 1900;   // warmest possible WLED CCT end
+      case 1: return 2600;
+      case 2: return 3500;
+      case 3: return 5500;
+      default: return 10000; // coldest practical WLED CCT end
+    }
+  }
+
+  const char* whiteName(uint8_t index) const
+  {
+    switch (index % WHITE_PRESET_COUNT) {
+      case 0: return "Very warm";
+      case 1: return "Warm";
+      case 2: return "Neutral";
+      case 3: return "Cool";
+      default: return "Very cool";
+    }
+  }
+
+  uint32_t whiteColor(uint8_t index) const
+  {
+    // Deliberately stronger wheel tints than a pure Kelvin conversion.
+    // The CCT slider is also set separately in applyRememberedWhite(), so the
+    // extreme presets reproduce the user's manual "red + full warm" / 
+    // "blue + full cold" behaviour instead of looking washed out.
+    switch (index % WHITE_PRESET_COUNT) {
+      case 0: return RGBW32(255,  18,   0, 255); // deep red-orange + max warm CCT
+      case 1: return RGBW32(255, 105,  12, 255); // amber/orange + warm CCT
+      case 2: return RGBW32(255, 225, 185, 255); // warm-neutral white
+      case 3: return RGBW32(185, 220, 255, 255); // cool white with blue tint
+      default:return RGBW32( 65, 135, 255, 255); // strong blue tint + max cold CCT
     }
   }
 
@@ -59,7 +85,7 @@ private:
   {
     uint8_t best = 0;
     uint32_t bestDiff = 0xFFFFFFFFUL;
-    for (uint8_t i = 0; i < 6; i++) {
+    for (uint8_t i = 0; i < WHITE_PRESET_COUNT; i++) {
       const uint16_t k = whiteKelvin(i);
       const uint32_t diff = (kelvin > k) ? (kelvin - k) : (k - kelvin);
       if (diff < bestDiff) {
@@ -72,8 +98,6 @@ private:
 
   uint16_t mainSegmentKelvinFromColor() const
   {
-    // Use the same RGB->white-temperature path WLED uses when "CCT from RGB"
-    // is enabled. This follows what the user sees when moving the color wheel.
     return approximateKelvinFromRGB(strip.getMainSegment().colors[0]);
   }
 
@@ -103,16 +127,15 @@ private:
   void applyRememberedWhite()
   {
     const uint16_t k = whiteKelvin(whiteIndex);
-    byte rgbw[4] = {0, 0, 0, 255};
-    colorKtoRGB(k, rgbw);
+    const uint32_t color = whiteColor(whiteIndex);
 
-    // The RGB portion encodes the desired white temperature for WLED's
-    // "CCT from RGB" calculation. W=255 provides the white-channel level.
-    const uint32_t color = RGBW32(rgbw[0], rgbw[1], rgbw[2], 255);
-
+    // Apply BOTH controls that gave the strongest result manually in WLED:
+    // primary wheel color plus the CCT slider position.
     for (size_t s = 0; s < strip.getSegmentsNum(); s++) {
       Segment& seg = strip.getSegment(s);
-      if (seg.isActive()) seg.setColor(0, color);
+      if (!seg.isActive()) continue;
+      seg.setColor(0, color);
+      seg.setCCT(k);
     }
 
     immediateStateUpdate(CALL_MODE_BUTTON);
@@ -230,7 +253,7 @@ private:
 
   void cycleWhite()
   {
-    whiteIndex = (whiteIndex + 1) % 6;
+    whiteIndex = (whiteIndex + 1) % WHITE_PRESET_COUNT;
     applyRememberedWhite();
     schedulePersist();
   }
@@ -409,8 +432,8 @@ public:
     bool complete = true;
     complete &= getJsonValue(top["lastBrightness"], lastBrightness, (uint8_t)255);
 
-    // New builds save whiteIndex. For compatibility with the previous test
-    // build, accept its cctIndex value as the same six-position index.
+    // New builds save whiteIndex. For compatibility with previous test builds,
+    // accept cctIndex as the same position and clamp the old 6th position to 5th.
     if (!getJsonValue(top["whiteIndex"], whiteIndex)) {
       complete &= getJsonValue(top["cctIndex"], whiteIndex, (uint8_t)2);
     }
@@ -418,7 +441,7 @@ public:
     // Never remember OFF as a brightness level. 2% is the minimum loop step.
     const uint8_t minimumBrightness = brightnessFromPercent(2);
     if (lastBrightness < minimumBrightness) lastBrightness = minimumBrightness;
-    if (whiteIndex > 5) whiteIndex = 2;
+    if (whiteIndex >= WHITE_PRESET_COUNT) whiteIndex = WHITE_PRESET_COUNT - 1;
 
     configLoaded = true;
     return complete;
@@ -437,8 +460,10 @@ public:
     briInfo.add(" %");
 
     JsonArray whiteInfo = user.createNestedArray("Flow white");
+    whiteInfo.add(whiteName(whiteIndex));
+    whiteInfo.add(" / ");
     whiteInfo.add(whiteKelvin(whiteIndex));
-    whiteInfo.add(" K eq.");
+    whiteInfo.add(" K");
   }
 
   uint16_t getId() override { return USERMOD_ID_UNSPECIFIED; }
