@@ -1,0 +1,50 @@
+name: Build WLED FlowButton OTA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'usermods/**'
+      - 'config/**'
+      - 'tools/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout custom files
+        uses: actions/checkout@v4
+
+      - name: Checkout WLED 0.15.1
+        run: git clone --depth 1 --branch v0.15.1 https://github.com/wled/WLED.git WLED
+
+      - name: Apply FlowButton
+        run: python3 tools/apply_flowbutton.py
+
+      - name: Install custom PlatformIO environment
+        run: cp config/platformio_override.ini WLED/platformio_override.ini
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run -d WLED -e flowbutton
+
+      - name: Prepare OTA firmware
+        run: cp WLED/.pio/build/flowbutton/firmware.bin WLED_0.15.1_ESP32_AudioReactive_FlowButton_OTA.bin
+
+      - name: Upload OTA firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: WLED_0.15.1_ESP32_AudioReactive_FlowButton_OTA
+          path: WLED_0.15.1_ESP32_AudioReactive_FlowButton_OTA.bin
+          if-no-files-found: error
+          retention-days: 30
