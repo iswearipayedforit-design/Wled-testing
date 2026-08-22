@@ -12,9 +12,9 @@ private:
   static constexpr uint32_t FLOW_DURATION_MS = 2500;
 
   static constexpr uint16_t DEBOUNCE_MS = 50;
-  static constexpr uint16_t DOUBLE_CLICK_MS = 350;
+  static constexpr uint16_t DOUBLE_CLICK_MS = 450;
   static constexpr uint16_t LONG_PRESS_MS = 600;
-  static constexpr uint16_t HOLD_REPEAT_MS = 450;
+  static constexpr uint16_t HOLD_REPEAT_MS = 1000;
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
 
   // Wipe state
@@ -33,18 +33,18 @@ private:
   bool clickPending = false;
   uint32_t firstReleaseMs = 0;
 
-  // Remembered user settings. lastBrightness is always a non-zero WLED bri value.
+  // Remembered user settings. lastBrightness is always non-zero.
   uint8_t lastBrightness = 255;
-  uint8_t cctIndex = 2;                // default 3200 K
+  uint8_t whiteIndex = 2;              // default 3200 K equivalent
   bool configLoaded = false;
   bool persistPending = false;
   uint32_t persistAfterMs = 0;
 
   bool initialized = false;
 
-  uint16_t cctKelvin(uint8_t index) const
+  uint16_t whiteKelvin(uint8_t index) const
   {
-    // Six useful points from very warm to cool daylight.
+    // Six useful white points from very warm to cool daylight.
     switch (index % 6) {
       case 0: return 2200;
       case 1: return 2700;
@@ -55,12 +55,12 @@ private:
     }
   }
 
-  uint8_t nearestCctIndex(uint16_t kelvin) const
+  uint8_t nearestWhiteIndex(uint16_t kelvin) const
   {
     uint8_t best = 0;
     uint32_t bestDiff = 0xFFFFFFFFUL;
     for (uint8_t i = 0; i < 6; i++) {
-      const uint16_t k = cctKelvin(i);
+      const uint16_t k = whiteKelvin(i);
       const uint32_t diff = (kelvin > k) ? (kelvin - k) : (k - kelvin);
       if (diff < bestDiff) {
         bestDiff = diff;
@@ -70,12 +70,16 @@ private:
     return best;
   }
 
-  uint16_t mainSegmentKelvin() const
+  uint16_t mainSegmentKelvinFromColor() const
   {
-    // WLED 0.15.1 stores Segment::cct as 0..255, where Kelvin is
-    // approximately 1900 + cct*32.
-    const uint8_t cct = strip.getMainSegment().cct;
-    return 1900U + ((uint16_t)cct << 5);
+    // Use the same RGB->white-temperature path WLED uses when "CCT from RGB"
+    // is enabled. This follows what the user sees when moving the color wheel.
+    return approximateKelvinFromRGB(strip.getMainSegment().colors[0]);
+  }
+
+  uint8_t brightnessFromPercent(uint8_t pct) const
+  {
+    return (uint8_t)(((uint16_t)pct * 255U + 50U) / 100U);
   }
 
   void schedulePersist()
@@ -84,15 +88,34 @@ private:
     persistAfterMs = millis() + PERSIST_DELAY_MS;
   }
 
-  void applyRememberedCct()
+  void immediateStateUpdate(uint8_t callMode)
   {
-    const uint16_t k = cctKelvin(cctIndex);
-    // Apply to every active segment so both physical CCT buses always match.
+    // Button actions should appear immediately, regardless of WLED's configured
+    // transition time. trigger() also bypasses Solid's normal 350 ms refresh delay.
+    const bool oldFadeTransition = fadeTransition;
+    fadeTransition = false;
+    stateChanged = true;
+    stateUpdated(callMode);
+    fadeTransition = oldFadeTransition;
+    strip.trigger();
+  }
+
+  void applyRememberedWhite()
+  {
+    const uint16_t k = whiteKelvin(whiteIndex);
+    byte rgbw[4] = {0, 0, 0, 255};
+    colorKtoRGB(k, rgbw);
+
+    // The RGB portion encodes the desired white temperature for WLED's
+    // "CCT from RGB" calculation. W=255 provides the white-channel level.
+    const uint32_t color = RGBW32(rgbw[0], rgbw[1], rgbw[2], 255);
+
     for (size_t s = 0; s < strip.getSegmentsNum(); s++) {
       Segment& seg = strip.getSegment(s);
-      if (seg.isActive()) seg.setCCT(k);
+      if (seg.isActive()) seg.setColor(0, color);
     }
-    strip.trigger();
+
+    immediateStateUpdate(CALL_MODE_BUTTON);
   }
 
   void startOrReverse()
@@ -111,10 +134,9 @@ private:
       if (bri == 0) {
         bri = lastBrightness;
         briLast = lastBrightness;
-        applyRememberedCct();
+        applyRememberedWhite();
         strip.restartRuntime();
-        stateChanged = true;
-        stateUpdated(CALL_MODE_BUTTON);
+        immediateStateUpdate(CALL_MODE_BUTTON);
       }
       direction = +1;
     } else {
@@ -157,8 +179,7 @@ private:
         lastBrightness = bri;
         briLast = lastBrightness;
         bri = 0;
-        stateChanged = true;
-        stateUpdated(CALL_MODE_BUTTON);
+        immediateStateUpdate(CALL_MODE_BUTTON);
         schedulePersist();
       } else {
         strip.trigger();
@@ -173,14 +194,16 @@ private:
 
   uint8_t nextBrightnessStep(uint8_t current) const
   {
-    // Convert to percentage and make a closed 100 -> 90 -> ... -> 10 -> 100 loop.
-    int pct = ((int)current * 100 + 127) / 255;
-    if (pct <= 10) pct = 100;
-    else {
-      pct = ((pct - 1) / 10) * 10; // 100->90, 73->70, 20->10
-      if (pct < 10) pct = 10;
-    }
-    return (uint8_t)((pct * 255 + 50) / 100);
+    // Closed dimming loop:
+    // >90 -> 90 -> 60 -> 30 -> 10 -> 2 -> 90 -> ...
+    const uint8_t pct = ((uint16_t)current * 100U + 127U) / 255U;
+
+    if (pct > 90) return brightnessFromPercent(90);
+    if (pct > 60) return brightnessFromPercent(60);
+    if (pct > 30) return brightnessFromPercent(30);
+    if (pct > 10) return brightnessFromPercent(10);
+    if (pct > 2)  return brightnessFromPercent(2);
+    return brightnessFromPercent(90);
   }
 
   void stepBrightness()
@@ -188,28 +211,27 @@ private:
     const uint8_t base = (bri > 0) ? bri : lastBrightness;
     lastBrightness = nextBrightnessStep(base);
 
-    // Holding the button while OFF should give visible feedback immediately.
+    // Holding the button while OFF gives visible feedback immediately.
     if (bri == 0) {
       progress = (float)FLOW_LED_COUNT;
       direction = 0;
-      applyRememberedCct();
+      bri = lastBrightness;
+      briLast = lastBrightness;
+      applyRememberedWhite();
       strip.restartRuntime();
+    } else {
+      bri = lastBrightness;
+      briLast = lastBrightness;
     }
 
-    bri = lastBrightness;
-    briLast = lastBrightness;
-    stateChanged = true;
-    stateUpdated(CALL_MODE_BUTTON);
-    strip.trigger();
+    immediateStateUpdate(CALL_MODE_BUTTON);
     schedulePersist();
   }
 
-  void cycleCct()
+  void cycleWhite()
   {
-    cctIndex = (cctIndex + 1) % 6;
-    applyRememberedCct();
-    stateChanged = true;
-    stateUpdated(CALL_MODE_BUTTON);
+    whiteIndex = (whiteIndex + 1) % 6;
+    applyRememberedWhite();
     schedulePersist();
   }
 
@@ -217,7 +239,7 @@ private:
   {
     const uint32_t now = millis();
 
-    // Long press: first brightness step at 600 ms, then one step every 450 ms.
+    // Long press: first step at 600 ms, then one brightness step every second.
     if (stablePressed) {
       if (!longHandled && (now - pressStartedMs >= LONG_PRESS_MS)) {
         longHandled = true;
@@ -247,20 +269,19 @@ public:
   void setup() override
   {
     // On the first firmware boot there is no FlowButton config yet, so inherit
-    // the user's current WLED brightness/CCT instead of replacing it.
+    // the user's current WLED brightness and current wheel-derived white color.
     if (!configLoaded) {
       uint8_t current = (bri > 0) ? bri : briLast;
       if (current == 0) current = 255;
       lastBrightness = current;
-      cctIndex = nearestCctIndex(mainSegmentKelvin());
+      whiteIndex = nearestWhiteIndex(mainSegmentKelvinFromColor());
       schedulePersist();
     }
 
-    // From then on, restore the remembered values after reboot. Preserve WLED's
-    // ON/OFF boot state; only replace brightness when it booted ON.
+    // Restore remembered values after reboot. Preserve WLED's ON/OFF boot state.
     briLast = lastBrightness;
     if (bri > 0) bri = lastBrightness;
-    applyRememberedCct();
+    applyRememberedWhite();
 
     progress = (bri > 0) ? (float)FLOW_LED_COUNT : 0.0f;
     rawPressed = false;
@@ -268,8 +289,7 @@ public:
     rawChangedMs = millis();
     initialized = true;
 
-    stateChanged = true;
-    stateUpdated(CALL_MODE_NO_NOTIFY);
+    immediateStateUpdate(CALL_MODE_NO_NOTIFY);
   }
 
   void loop() override
@@ -304,9 +324,9 @@ public:
         // A completed long press must not also fire a click action.
         if (!longHandled) {
           if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
-            // Second short click: consume the pending single and change CCT.
+            // Second short click: consume the pending single and change white color.
             clickPending = false;
-            cycleCct();
+            cycleWhite();
           } else {
             // First short click: wait briefly to see whether a second click follows.
             clickPending = true;
@@ -350,8 +370,8 @@ public:
     }
   }
 
-  // Also learn brightness/CCT changed from the WLED UI or presets, so the next
-  // physical-button action starts from the user's latest settings.
+  // Learn brightness/white changes made from the WLED UI or presets, so the
+  // next physical-button action starts from the user's latest settings.
   void onStateChange(uint8_t mode) override
   {
     if (!initialized) return;
@@ -362,9 +382,9 @@ public:
       changed = true;
     }
 
-    const uint8_t nearest = nearestCctIndex(mainSegmentKelvin());
-    if (nearest != cctIndex) {
-      cctIndex = nearest;
+    const uint8_t nearest = nearestWhiteIndex(mainSegmentKelvinFromColor());
+    if (nearest != whiteIndex) {
+      whiteIndex = nearest;
       changed = true;
     }
 
@@ -375,7 +395,7 @@ public:
   {
     JsonObject top = root.createNestedObject("FlowButton");
     top["lastBrightness"] = lastBrightness;
-    top["cctIndex"] = cctIndex;
+    top["whiteIndex"] = whiteIndex;
   }
 
   bool readFromConfig(JsonObject& root) override
@@ -388,11 +408,17 @@ public:
 
     bool complete = true;
     complete &= getJsonValue(top["lastBrightness"], lastBrightness, (uint8_t)255);
-    complete &= getJsonValue(top["cctIndex"], cctIndex, (uint8_t)2);
 
-    // Never remember OFF as a brightness level; the loop intentionally starts at 10%.
-    if (lastBrightness < 26) lastBrightness = 26;
-    if (cctIndex > 5) cctIndex = 2;
+    // New builds save whiteIndex. For compatibility with the previous test
+    // build, accept its cctIndex value as the same six-position index.
+    if (!getJsonValue(top["whiteIndex"], whiteIndex)) {
+      complete &= getJsonValue(top["cctIndex"], whiteIndex, (uint8_t)2);
+    }
+
+    // Never remember OFF as a brightness level. 2% is the minimum loop step.
+    const uint8_t minimumBrightness = brightnessFromPercent(2);
+    if (lastBrightness < minimumBrightness) lastBrightness = minimumBrightness;
+    if (whiteIndex > 5) whiteIndex = 2;
 
     configLoaded = true;
     return complete;
@@ -410,9 +436,9 @@ public:
     briInfo.add(((uint16_t)lastBrightness * 100 + 127) / 255);
     briInfo.add(" %");
 
-    JsonArray cctInfo = user.createNestedArray("Flow CCT");
-    cctInfo.add(cctKelvin(cctIndex));
-    cctInfo.add(" K");
+    JsonArray whiteInfo = user.createNestedArray("Flow white");
+    whiteInfo.add(whiteKelvin(whiteIndex));
+    whiteInfo.add(" K eq.");
   }
 
   uint16_t getId() override { return USERMOD_ID_UNSPECIFIED; }
