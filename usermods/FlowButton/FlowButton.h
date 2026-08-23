@@ -12,7 +12,7 @@ private:
   static constexpr uint32_t FLOW_DURATION_MS = 2500;
 
   static constexpr uint16_t DEBOUNCE_MS = 50;
-  static constexpr uint16_t DOUBLE_CLICK_MS = 450;
+  static constexpr uint16_t DOUBLE_CLICK_MS = 600;
   static constexpr uint16_t LONG_PRESS_MS = 600;
   static constexpr uint16_t HOLD_REPEAT_MS = 1000;
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
