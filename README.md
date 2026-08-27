@@ -21,39 +21,34 @@ Custom OTA build for classic ESP32 based on upstream WLED `v0.15.1`.
 
 Starts the smooth wipe ON from logical LED 0 to LED 96. When the lamp is already on, a single click wipes OFF in the opposite direction. A click during a running wipe reverses direction from the current position.
 
-Because the same button also supports double-click, the single-click action is confirmed after a 450 ms double-click window.
+Because the same button also supports double-click, the single-click action is confirmed after a **600 ms** double-click window.
 
 ### Hold
 
-After 600 ms the global brightness begins moving through this closed dimming loop:
+After 600 ms the global brightness moves through three raw WLED `bri` levels:
 
-`90% -> 60% -> 30% -> 10% -> 2% -> 90% -> ...`
+`60 -> 20 -> 5 -> 60 -> ...`
 
-If the current brightness is above or between these values, the first hold step chooses the next lower value. Another step is applied every 1000 ms while the button remains held.
-
-Each brightness change bypasses the normal WLED transition delay and forces an immediate render, just like the wipe animation.
+These are direct values on WLED's 1-255 brightness scale, not percentages. Another step is applied every 1000 ms while the button remains held.
 
 ### Double click
 
-Cycles through five deliberately strong white presets:
+Cycles through **four presets reconstructed directly from the user's WLED screenshots**. Each preset reproduces all three visible color controls: color-wheel RGB, white slider at 255, and the CCT slider position.
 
-1. Very warm — red/orange wheel tint + 1900 K CCT
-2. Warm — amber/orange wheel tint + 2600 K CCT
-3. Neutral — warm-neutral wheel tint + 3500 K CCT
-4. Cool — blue-white wheel tint + 5500 K CCT
-5. Very cool — strong blue wheel tint + 10000 K CCT
+1. Red warm — RGBW `(255, 27, 26, 255)`, CCT `0/255`
+2. Amber warm — RGBW `(255, 146, 28, 255)`, CCT `0/255`
+3. Warm white — RGBW `(255, 213, 176, 255)`, CCT `64/255`
+4. Cool white — RGBW `(231, 234, 255, 255)`, CCT `180/255`
 
-Each preset sets **both** the primary color-wheel value and the CCT slider value. This reproduces the stronger manual combinations possible in WLED (for example red/orange plus maximum warm CCT) instead of relying on CCT or RGB alone.
-
-The change is followed by an immediate forced render so it is visible without waiting for Solid's normal refresh interval.
+The presets loop continuously with each double click.
 
 ### Memory
 
-FlowButton remembers the last non-zero brightness and the last white preset. Changes made from the WLED UI or presets are also learned. The remembered values are saved to WLED `cfg.json` after changes settle, so they survive reboot without repeatedly writing flash during a button hold.
+FlowButton remembers the last non-zero brightness and the last white preset. Changes made from the WLED UI are matched to the nearest of the four presets. The remembered values are saved to WLED `cfg.json` after changes settle so they survive reboot without repeatedly writing flash during a button hold.
 
 ## Effects
 
-The wipe is an overlay over WLED's normal rendering. AudioReactive effects continue rendering normally. While a wipe is active, FlowButton forces normal animation frames so Solid does not update in large 350 ms jumps.
+The wipe is an overlay over WLED's normal rendering. AudioReactive effects continue rendering normally. While a wipe is active, FlowButton forces normal animation frames so Solid does not update in large jumps.
 
 ## OTA
 
