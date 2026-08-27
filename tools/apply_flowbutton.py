@@ -11,6 +11,10 @@ include_block = include_anchor + '''
   #include "../usermods/FlowButton/FlowButton.h"
 #endif
 
+#ifdef USERMOD_SMOOTHBUTTON
+  #include "../usermods/SmoothButton/SmoothButton.h"
+#endif
+
 #ifdef USERMOD_TOUCHBUTTON
   #include "../usermods/TouchButton/TouchButton.h"
 #endif
@@ -20,6 +24,10 @@ register_anchor = '#ifdef USERMOD_AUDIOREACTIVE\n  UsermodManager::add(new Audio
 register_block = register_anchor + '''
   #ifdef USERMOD_FLOWBUTTON
   UsermodManager::add(new FlowButton());
+  #endif
+
+  #ifdef USERMOD_SMOOTHBUTTON
+  UsermodManager::add(new SmoothButton());
   #endif
 
   #ifdef USERMOD_TOUCHBUTTON
@@ -36,11 +44,11 @@ source = source.replace(include_anchor, include_block, 1)
 source = source.replace(register_anchor, register_block, 1)
 userlist.write_text(source, encoding='utf-8')
 
-for name in ('FlowButton', 'TouchButton'):
+for name in ('FlowButton', 'SmoothButton', 'TouchButton'):
     src = root / 'usermods' / name
     dst = wled / 'usermods' / name
     dst.mkdir(parents=True, exist_ok=True)
     header = f'{name}.h'
     (dst / header).write_text((src / header).read_text(encoding='utf-8'), encoding='utf-8')
 
-print('FlowButton and TouchButton applied to WLED source tree.')
+print('FlowButton, SmoothButton and TouchButton applied to WLED source tree.')
