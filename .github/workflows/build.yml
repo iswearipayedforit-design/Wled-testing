@@ -21,7 +21,7 @@ jobs:
       - name: Checkout WLED 0.15.1
         run: git clone --depth 1 --branch v0.15.1 https://github.com/wled/WLED.git WLED
 
-      - name: Apply button usermod
+      - name: Apply button usermods
         run: python3 tools/apply_flowbutton.py
 
       - name: Install custom PlatformIO environments
@@ -45,6 +45,11 @@ jobs:
           pio run -d WLED -e smoothbutton
           cp WLED/build_output/release/WLED_0.15.1_ESP32.bin WLED_0.15.1_ESP32_AudioReactive_SmoothButton_OTA.bin
 
+      - name: Build TouchButton firmware
+        run: |
+          pio run -d WLED -e touchbutton
+          cp WLED/build_output/release/WLED_0.15.1_ESP32.bin WLED_0.15.1_ESP32_AudioReactive_TouchButton_1s_OTA.bin
+
       - name: Upload FlowButton OTA firmware
         uses: actions/upload-artifact@v4
         with:
@@ -58,5 +63,13 @@ jobs:
         with:
           name: WLED_0.15.1_ESP32_AudioReactive_SmoothButton_OTA
           path: WLED_0.15.1_ESP32_AudioReactive_SmoothButton_OTA.bin
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload TouchButton OTA firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: WLED_0.15.1_ESP32_AudioReactive_TouchButton_1s_OTA
+          path: WLED_0.15.1_ESP32_AudioReactive_TouchButton_1s_OTA.bin
           if-no-files-found: error
           retention-days: 30
