@@ -2,9 +2,10 @@
 
 #include "wled.h"
 
-// One usermod, two build variants:
-// - FlowButton: original 97-LED directional wipe
-// - SmoothButton (FLOWBUTTON_NO_WIPE): normal WLED ON/OFF fade, no LED-count dependency
+// FlowButton: 97-LED directional wipe with immediate single-click response.
+// Logical LED order is handled by WLED bus configuration:
+// 0..36  = GPIO2 bus (Reversed)
+// 37..96 = GPIO16 bus (normal)
 class FlowButton : public Usermod {
 private:
   static constexpr uint16_t FLOW_LED_COUNT = 97;
@@ -17,19 +18,10 @@ private:
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
   static constexpr uint8_t WHITE_PRESET_COUNT = 4;
 
-#ifdef FLOWBUTTON_NO_WIPE
-  // SmoothButton deliberately owns GPIO33 directly. This avoids inheriting a
-  // stale/foreign WLED button configuration when the firmware is installed OTA
-  // on another controller. Wiring is GPIO33 -> momentary button -> GND.
-  static constexpr uint8_t SMOOTH_BUTTON_PIN = 33;
-#endif
-
-  // Wipe state (used only by the FlowButton build).
-  float progress = 0.0f;
-  int8_t direction = 0;
+  float progress = 0.0f;  // visible LEDs, 0..97
+  int8_t direction = 0;   // +1 = wipe ON, -1 = wipe OFF, 0 = idle
   uint32_t lastAnimMs = 0;
 
-  // Button/debounce/gesture state.
   bool rawPressed = false;
   bool stablePressed = false;
   uint32_t rawChangedMs = 0;
@@ -37,16 +29,17 @@ private:
   uint32_t lastHoldStepMs = 0;
   bool longHandled = false;
 
+  // A first short click acts immediately. This state only keeps the 600 ms
+  // opportunity open for a second click.
   bool clickPending = false;
+  bool secondClickArmed = false;
   uint32_t firstReleaseMs = 0;
 
-  // Remembered user settings.
   uint8_t lastBrightness = 60;
   uint8_t whiteIndex = 2;
   bool configLoaded = false;
   bool persistPending = false;
   uint32_t persistAfterMs = 0;
-
   bool initialized = false;
 
   uint8_t whiteCct(uint8_t index) const
@@ -97,9 +90,9 @@ private:
       const int dc = currentCct - (int)whiteCct(i);
 
       const uint32_t score =
-        (uint32_t)(dr*dr) + (uint32_t)(dg*dg) +
-        (uint32_t)(db*db) + (uint32_t)(dw*dw) +
-        (uint32_t)(dc*dc);
+        (uint32_t)(dr * dr) + (uint32_t)(dg * dg) +
+        (uint32_t)(db * db) + (uint32_t)(dw * dw) +
+        (uint32_t)(dc * dc);
 
       if (score < bestScore) {
         bestScore = score;
@@ -145,11 +138,11 @@ private:
     immediateStateUpdate(CALL_MODE_BUTTON);
   }
 
-#ifndef FLOWBUTTON_NO_WIPE
   void startOrReverse()
   {
     const uint32_t now = millis();
 
+    // If a wipe is already running, reverse from the exact current position.
     if (direction != 0) {
       direction = -direction;
       lastAnimMs = now;
@@ -212,32 +205,16 @@ private:
       return;
     }
 
+    // Force normal frame-rate rendering so Solid does not update the overlay
+    // only at its much slower native interval.
     strip.trigger();
   }
-#else
-  void toggleSmooth()
-  {
-    if (bri == 0) {
-      briLast = lastBrightness;
-      setRememberedWhiteRaw();
-      toggleOnOff();
-    } else {
-      lastBrightness = bri;
-      briLast = lastBrightness;
-      toggleOnOff();
-      schedulePersist();
-    }
-
-    // Keep the normal WLED transition enabled for a natural short fade.
-    stateUpdated(CALL_MODE_BUTTON);
-  }
-#endif
 
   uint8_t nextBrightnessStep(uint8_t current) const
   {
     if (current > 60) return 60;
     if (current > 20) return 20;
-    if (current > 5)  return 5;
+    if (current > 5) return 5;
     return 60;
   }
 
@@ -247,10 +224,9 @@ private:
     lastBrightness = nextBrightnessStep(base);
 
     if (bri == 0) {
-#ifndef FLOWBUTTON_NO_WIPE
+      // A hold is a direct brightness command, not a wipe command.
       progress = (float)FLOW_LED_COUNT;
       direction = 0;
-#endif
       bri = lastBrightness;
       briLast = lastBrightness;
       applyRememberedWhite();
@@ -271,8 +247,25 @@ private:
     schedulePersist();
   }
 
-  // Shared debounced state machine. The input itself can come from WLED's
-  // button manager (FlowButton) or directly from GPIO33 (SmoothButton).
+  void completeFirstClick()
+  {
+    // No 600 ms wait: start/reverse the wipe immediately on release.
+    startOrReverse();
+    clickPending = true;
+    firstReleaseMs = millis();
+  }
+
+  void completeDoubleClick()
+  {
+    clickPending = false;
+    secondClickArmed = false;
+
+    // The first click already started a wipe. Change color and reverse that wipe
+    // so the final power state is the same as before the first click.
+    cycleWhite();
+    startOrReverse();
+  }
+
   void processButtonSample(bool pressed)
   {
     const uint32_t now = millis();
@@ -282,32 +275,29 @@ private:
       rawChangedMs = now;
     }
 
-    if ((now - rawChangedMs) >= DEBOUNCE_MS && stablePressed != rawPressed) {
-      stablePressed = rawPressed;
+    if ((now - rawChangedMs) < DEBOUNCE_MS || stablePressed == rawPressed) return;
 
-      if (stablePressed) {
-        pressStartedMs = now;
-        lastHoldStepMs = now;
-        longHandled = false;
-      } else if (!longHandled) {
-        if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
-          clickPending = false;
-          cycleWhite();
-        } else {
-          clickPending = true;
-          firstReleaseMs = now;
-        }
-      }
+    stablePressed = rawPressed;
+
+    if (stablePressed) {
+      pressStartedMs = now;
+      lastHoldStepMs = now;
+      longHandled = false;
+
+      // Count the double-click window to the START of click #2. This makes the
+      // gesture easier while preserving immediate response to click #1.
+      secondClickArmed = clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS);
+      return;
     }
-  }
 
-#ifdef FLOWBUTTON_NO_WIPE
-  void pollSmoothButton()
-  {
-    // Active-low momentary button with internal pull-up.
-    processButtonSample(digitalRead(SMOOTH_BUTTON_PIN) == LOW);
+    if (longHandled) {
+      secondClickArmed = false;
+      return;
+    }
+
+    if (secondClickArmed) completeDoubleClick();
+    else completeFirstClick();
   }
-#endif
 
   void handleGestureTimers()
   {
@@ -317,6 +307,7 @@ private:
       if (!longHandled && (now - pressStartedMs >= LONG_PRESS_MS)) {
         longHandled = true;
         clickPending = false;
+        secondClickArmed = false;
         stepBrightness();
         lastHoldStepMs = now;
       } else if (longHandled && (now - lastHoldStepMs >= HOLD_REPEAT_MS)) {
@@ -325,13 +316,11 @@ private:
       }
     }
 
+    // Single-click action already happened immediately. Expiry only closes the
+    // chance for a second click; no visible action is delayed here.
     if (clickPending && !stablePressed && (now - firstReleaseMs > DOUBLE_CLICK_MS)) {
       clickPending = false;
-#ifndef FLOWBUTTON_NO_WIPE
-      startOrReverse();
-#else
-      toggleSmooth();
-#endif
+      secondClickArmed = false;
     }
 
     if (persistPending && (int32_t)(now - persistAfterMs) >= 0 && !strip.isUpdating()) {
@@ -343,10 +332,6 @@ private:
 public:
   void setup() override
   {
-#ifdef FLOWBUTTON_NO_WIPE
-    pinMode(SMOOTH_BUTTON_PIN, INPUT_PULLUP);
-#endif
-
     if (!configLoaded) {
       uint8_t current = (bri > 0) ? bri : briLast;
       if (current == 0) current = 60;
@@ -361,19 +346,9 @@ public:
     if (bri > 0) bri = lastBrightness;
     applyRememberedWhite();
 
-#ifndef FLOWBUTTON_NO_WIPE
     progress = (bri > 0) ? (float)FLOW_LED_COUNT : 0.0f;
-#endif
-
-#ifdef FLOWBUTTON_NO_WIPE
-    // Start from the actual electrical input level so a floating/stale WLED
-    // button state cannot create a phantom long press after boot.
-    rawPressed = (digitalRead(SMOOTH_BUTTON_PIN) == LOW);
-    stablePressed = rawPressed;
-#else
     rawPressed = false;
     stablePressed = false;
-#endif
     rawChangedMs = millis();
     initialized = true;
 
@@ -383,31 +358,19 @@ public:
   void loop() override
   {
     if (!initialized) return;
-#ifndef FLOWBUTTON_NO_WIPE
     updateAnimation();
-#else
-    pollSmoothButton();
-#endif
     handleGestureTimers();
   }
 
   bool handleButton(uint8_t b) override
   {
-#ifdef FLOWBUTTON_NO_WIPE
-    // SmoothButton samples GPIO33 directly in loop(). If WLED happens to have a
-    // saved Button 0 configuration too, consume it here so its normal actions do
-    // not run in parallel with our gesture handler.
-    return b == 0;
-#else
     if (!initialized || b != 0 || btnPin[b] < 0 || buttonType[b] == BTN_TYPE_NONE) return false;
     processButtonSample(isButtonPressed(b));
     return true;
-#endif
   }
 
   void handleOverlayDraw() override
   {
-#ifndef FLOWBUTTON_NO_WIPE
     if (!initialized) return;
 
     float p = progress;
@@ -432,7 +395,6 @@ public:
     for (uint16_t i = firstHidden; i < FLOW_LED_COUNT; i++) {
       strip.setPixelColor(i, 0);
     }
-#endif
   }
 
   void onStateChange(uint8_t mode) override
@@ -488,13 +450,12 @@ public:
     JsonObject user = root["u"];
     if (user.isNull()) user = root.createNestedObject("u");
 
-#ifdef FLOWBUTTON_NO_WIPE
-    JsonArray stateInfo = user.createNestedArray("SmoothButton");
-    stateInfo.add(bri > 0 ? "ON" : "OFF");
-#else
     JsonArray stateInfo = user.createNestedArray("FlowButton");
     stateInfo.add(direction > 0 ? "Wipe ON" : direction < 0 ? "Wipe OFF" : progress > 0.0f ? "ON" : "OFF");
-#endif
+
+    JsonArray windowInfo = user.createNestedArray("Flow double window");
+    windowInfo.add(DOUBLE_CLICK_MS);
+    windowInfo.add(" ms");
 
     JsonArray briInfo = user.createNestedArray("Button brightness");
     briInfo.add(lastBrightness);
