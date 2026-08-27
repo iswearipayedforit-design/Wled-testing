@@ -16,7 +16,7 @@ private:
   static constexpr uint16_t LONG_PRESS_MS = 600;
   static constexpr uint16_t HOLD_REPEAT_MS = 1000;
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
-  static constexpr uint8_t WHITE_PRESET_COUNT = 5;
+  static constexpr uint8_t WHITE_PRESET_COUNT = 4;
 
   // Wipe state
   float progress = 0.0f;              // visible LEDs, 0.0 .. FLOW_LED_COUNT
@@ -35,75 +35,85 @@ private:
   uint32_t firstReleaseMs = 0;
 
   // Remembered user settings. lastBrightness is always non-zero.
-  uint8_t lastBrightness = 255;
-  uint8_t whiteIndex = 2;              // default neutral preset
+  uint8_t lastBrightness = 60;
+  uint8_t whiteIndex = 2;
   bool configLoaded = false;
   bool persistPending = false;
   uint32_t persistAfterMs = 0;
 
   bool initialized = false;
 
-  uint16_t whiteKelvin(uint8_t index) const
+  // These four presets were reconstructed directly from the four WLED screenshots.
+  // Wheel geometry in WLED/iro.js: hue from angle, saturation from radius, value=100%.
+  // The white slider was at 255 in every screenshot.
+  // The CCT slider positions were approximately 0, 0, 64 and 180 on WLED's 0..255 scale.
+  uint8_t whiteCct(uint8_t index) const
   {
-    // CCT part of each combined RGB+CCT preset.
     switch (index % WHITE_PRESET_COUNT) {
-      case 0: return 1900;   // warmest possible WLED CCT end
-      case 1: return 2600;
-      case 2: return 3500;
-      case 3: return 5500;
-      default: return 10000; // coldest practical WLED CCT end
+      case 0: return 0;
+      case 1: return 0;
+      case 2: return 64;
+      default: return 180;
     }
   }
 
   const char* whiteName(uint8_t index) const
   {
     switch (index % WHITE_PRESET_COUNT) {
-      case 0: return "Very warm";
-      case 1: return "Warm";
-      case 2: return "Neutral";
-      case 3: return "Cool";
-      default: return "Very cool";
+      case 0: return "Red warm";
+      case 1: return "Amber warm";
+      case 2: return "Warm white";
+      default: return "Cool white";
     }
   }
 
   uint32_t whiteColor(uint8_t index) const
   {
-    // Deliberately stronger wheel tints than a pure Kelvin conversion.
-    // The CCT slider is also set separately in applyRememberedWhite(), so the
-    // extreme presets reproduce the user's manual "red + full warm" / 
-    // "blue + full cold" behaviour instead of looking washed out.
     switch (index % WHITE_PRESET_COUNT) {
-      case 0: return RGBW32(255,  18,   0, 255); // deep red-orange + max warm CCT
-      case 1: return RGBW32(255, 105,  12, 255); // amber/orange + warm CCT
-      case 2: return RGBW32(255, 225, 185, 255); // warm-neutral white
-      case 3: return RGBW32(185, 220, 255, 255); // cool white with blue tint
-      default:return RGBW32( 65, 135, 255, 255); // strong blue tint + max cold CCT
+      // Screenshot 1: wheel almost full saturation at red/top, W=255, CCT far warm.
+      case 0: return RGBW32(255, 27, 26, 255);
+
+      // Screenshot 2: wheel near orange, almost full saturation, W=255, CCT far warm.
+      case 1: return RGBW32(255, 146, 28, 255);
+
+      // Screenshot 3: pale warm/orange, low saturation, W=255, CCT ~25%.
+      case 2: return RGBW32(255, 213, 176, 255);
+
+      // Screenshot 4: very pale cool blue, very low saturation, W=255, CCT ~70%.
+      default: return RGBW32(231, 234, 255, 255);
     }
   }
 
-  uint8_t nearestWhiteIndex(uint16_t kelvin) const
+  uint8_t nearestWhiteIndexFromState() const
   {
+    const Segment& seg = strip.getMainSegment();
+    const uint32_t current = seg.colors[0];
+    const int currentCct = seg.cct;
+
     uint8_t best = 0;
-    uint32_t bestDiff = 0xFFFFFFFFUL;
+    uint32_t bestScore = 0xFFFFFFFFUL;
+
     for (uint8_t i = 0; i < WHITE_PRESET_COUNT; i++) {
-      const uint16_t k = whiteKelvin(i);
-      const uint32_t diff = (kelvin > k) ? (kelvin - k) : (k - kelvin);
-      if (diff < bestDiff) {
-        bestDiff = diff;
+      const uint32_t target = whiteColor(i);
+      const int dr = (int)R(current) - (int)R(target);
+      const int dg = (int)G(current) - (int)G(target);
+      const int db = (int)B(current) - (int)B(target);
+      const int dw = (int)W(current) - (int)W(target);
+      const int dc = currentCct - (int)whiteCct(i);
+
+      // Compare both wheel/white-slider state and CCT-slider state.
+      const uint32_t score =
+        (uint32_t)(dr*dr) + (uint32_t)(dg*dg) +
+        (uint32_t)(db*db) + (uint32_t)(dw*dw) +
+        (uint32_t)(dc*dc);
+
+      if (score < bestScore) {
+        bestScore = score;
         best = i;
       }
     }
+
     return best;
-  }
-
-  uint16_t mainSegmentKelvinFromColor() const
-  {
-    return approximateKelvinFromRGB(strip.getMainSegment().colors[0]);
-  }
-
-  uint8_t brightnessFromPercent(uint8_t pct) const
-  {
-    return (uint8_t)(((uint16_t)pct * 255U + 50U) / 100U);
   }
 
   void schedulePersist()
@@ -115,7 +125,7 @@ private:
   void immediateStateUpdate(uint8_t callMode)
   {
     // Button actions should appear immediately, regardless of WLED's configured
-    // transition time. trigger() also bypasses Solid's normal 350 ms refresh delay.
+    // transition time. trigger() also bypasses Solid's normal slow refresh.
     const bool oldFadeTransition = fadeTransition;
     fadeTransition = false;
     stateChanged = true;
@@ -126,16 +136,16 @@ private:
 
   void applyRememberedWhite()
   {
-    const uint16_t k = whiteKelvin(whiteIndex);
+    const uint8_t cct = whiteCct(whiteIndex);
     const uint32_t color = whiteColor(whiteIndex);
 
-    // Apply BOTH controls that gave the strongest result manually in WLED:
-    // primary wheel color plus the CCT slider position.
+    // Reproduce exactly the controls visible in the screenshots:
+    // wheel RGB + white slider at 255 + CCT slider position.
     for (size_t s = 0; s < strip.getSegmentsNum(); s++) {
       Segment& seg = strip.getSegment(s);
       if (!seg.isActive()) continue;
       seg.setColor(0, color);
-      seg.setCCT(k);
+      seg.setCCT(cct);
     }
 
     immediateStateUpdate(CALL_MODE_BUTTON);
@@ -146,13 +156,12 @@ private:
     const uint32_t now = millis();
 
     if (direction != 0) {
-      direction = -direction;          // reverse immediately from current position
+      direction = -direction;
       lastAnimMs = now;
       strip.trigger();
       return;
     }
 
-    // If WLED is currently off (or the wipe is fully hidden), start revealing it.
     if (bri == 0 || progress <= 0.001f) {
       if (bri == 0) {
         bri = lastBrightness;
@@ -196,8 +205,6 @@ private:
       progress = 0.0f;
       direction = 0;
 
-      // Keep WLED fully off after the OFF wipe finishes, but preserve the
-      // remembered non-zero brightness for the next ON wipe.
       if (bri != 0) {
         lastBrightness = bri;
         briLast = lastBrightness;
@@ -210,23 +217,18 @@ private:
       return;
     }
 
-    // Solid normally renders only every 350 ms in WLED 0.15.1. Force normal
-    // animation frames while the wipe is moving so the overlay stays smooth.
+    // Force normal animation frames while the wipe is moving.
     strip.trigger();
   }
 
   uint8_t nextBrightnessStep(uint8_t current) const
   {
-    // Closed dimming loop:
-    // >90 -> 90 -> 60 -> 30 -> 10 -> 2 -> 90 -> ...
-    const uint8_t pct = ((uint16_t)current * 100U + 127U) / 255U;
-
-    if (pct > 90) return brightnessFromPercent(90);
-    if (pct > 60) return brightnessFromPercent(60);
-    if (pct > 30) return brightnessFromPercent(30);
-    if (pct > 10) return brightnessFromPercent(10);
-    if (pct > 2)  return brightnessFromPercent(2);
-    return brightnessFromPercent(90);
+    // Raw WLED bri values, NOT percentages.
+    // Closed dimming loop: >60 -> 60 -> 20 -> 5 -> 60 -> ...
+    if (current > 60) return 60;
+    if (current > 20) return 20;
+    if (current > 5)  return 5;
+    return 60;
   }
 
   void stepBrightness()
@@ -234,7 +236,6 @@ private:
     const uint8_t base = (bri > 0) ? bri : lastBrightness;
     lastBrightness = nextBrightnessStep(base);
 
-    // Holding the button while OFF gives visible feedback immediately.
     if (bri == 0) {
       progress = (float)FLOW_LED_COUNT;
       direction = 0;
@@ -262,11 +263,11 @@ private:
   {
     const uint32_t now = millis();
 
-    // Long press: first step at 600 ms, then one brightness step every second.
+    // Long press: first brightness step at 600 ms, then one step every second.
     if (stablePressed) {
       if (!longHandled && (now - pressStartedMs >= LONG_PRESS_MS)) {
         longHandled = true;
-        clickPending = false; // a hold is never also a single/double click
+        clickPending = false;
         stepBrightness();
         lastHoldStepMs = now;
       } else if (longHandled && (now - lastHoldStepMs >= HOLD_REPEAT_MS)) {
@@ -275,13 +276,12 @@ private:
       }
     }
 
-    // Single click is delayed only long enough to distinguish it from a double click.
+    // Wait 600 ms before accepting a single click so a slower double click is safe.
     if (clickPending && !stablePressed && (now - firstReleaseMs > DOUBLE_CLICK_MS)) {
       clickPending = false;
       startOrReverse();
     }
 
-    // Persist only after changes have settled, and never while the strip is busy.
     if (persistPending && (int32_t)(now - persistAfterMs) >= 0 && !strip.isUpdating()) {
       persistPending = false;
       serializeConfig();
@@ -291,17 +291,16 @@ private:
 public:
   void setup() override
   {
-    // On the first firmware boot there is no FlowButton config yet, so inherit
-    // the user's current WLED brightness and current wheel-derived white color.
     if (!configLoaded) {
       uint8_t current = (bri > 0) ? bri : briLast;
-      if (current == 0) current = 255;
+      if (current == 0) current = 60;
       lastBrightness = current;
-      whiteIndex = nearestWhiteIndex(mainSegmentKelvinFromColor());
+      whiteIndex = nearestWhiteIndexFromState();
       schedulePersist();
     }
 
-    // Restore remembered values after reboot. Preserve WLED's ON/OFF boot state.
+    if (lastBrightness < 5) lastBrightness = 5;
+
     briLast = lastBrightness;
     if (bri > 0) bri = lastBrightness;
     applyRememberedWhite();
@@ -344,14 +343,11 @@ public:
         lastHoldStepMs = now;
         longHandled = false;
       } else {
-        // A completed long press must not also fire a click action.
         if (!longHandled) {
           if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
-            // Second short click: consume the pending single and change white color.
             clickPending = false;
             cycleWhite();
           } else {
-            // First short click: wait briefly to see whether a second click follows.
             clickPending = true;
             firstReleaseMs = now;
           }
@@ -363,8 +359,7 @@ public:
   }
 
   // WLED renders the current effect normally; this overlay masks the portion
-  // that has not yet been reached by the wipe. The fractional boundary LED is
-  // brightness-scaled for a smoother moving edge.
+  // that has not yet been reached by the wipe.
   void handleOverlayDraw() override
   {
     if (!initialized) return;
@@ -393,8 +388,8 @@ public:
     }
   }
 
-  // Learn brightness/white changes made from the WLED UI or presets, so the
-  // next physical-button action starts from the user's latest settings.
+  // Learn brightness and whichever of the four presets is nearest to a manual
+  // WLED UI state, so button control remains in sync with the UI.
   void onStateChange(uint8_t mode) override
   {
     if (!initialized) return;
@@ -405,7 +400,7 @@ public:
       changed = true;
     }
 
-    const uint8_t nearest = nearestWhiteIndex(mainSegmentKelvinFromColor());
+    const uint8_t nearest = nearestWhiteIndexFromState();
     if (nearest != whiteIndex) {
       whiteIndex = nearest;
       changed = true;
@@ -430,17 +425,13 @@ public:
     }
 
     bool complete = true;
-    complete &= getJsonValue(top["lastBrightness"], lastBrightness, (uint8_t)255);
+    complete &= getJsonValue(top["lastBrightness"], lastBrightness, (uint8_t)60);
 
-    // New builds save whiteIndex. For compatibility with previous test builds,
-    // accept cctIndex as the same position and clamp the old 6th position to 5th.
     if (!getJsonValue(top["whiteIndex"], whiteIndex)) {
       complete &= getJsonValue(top["cctIndex"], whiteIndex, (uint8_t)2);
     }
 
-    // Never remember OFF as a brightness level. 2% is the minimum loop step.
-    const uint8_t minimumBrightness = brightnessFromPercent(2);
-    if (lastBrightness < minimumBrightness) lastBrightness = minimumBrightness;
+    if (lastBrightness < 5) lastBrightness = 5;
     if (whiteIndex >= WHITE_PRESET_COUNT) whiteIndex = WHITE_PRESET_COUNT - 1;
 
     configLoaded = true;
@@ -456,14 +447,14 @@ public:
     stateInfo.add(direction > 0 ? "Wipe ON" : direction < 0 ? "Wipe OFF" : progress > 0.0f ? "ON" : "OFF");
 
     JsonArray briInfo = user.createNestedArray("Flow brightness");
-    briInfo.add(((uint16_t)lastBrightness * 100 + 127) / 255);
-    briInfo.add(" %");
+    briInfo.add(lastBrightness);
+    briInfo.add(" / 255");
 
     JsonArray whiteInfo = user.createNestedArray("Flow white");
     whiteInfo.add(whiteName(whiteIndex));
-    whiteInfo.add(" / ");
-    whiteInfo.add(whiteKelvin(whiteIndex));
-    whiteInfo.add(" K");
+    whiteInfo.add(" / CCT ");
+    whiteInfo.add(whiteCct(whiteIndex));
+    whiteInfo.add("/255");
   }
 
   uint16_t getId() override { return USERMOD_ID_UNSPECIFIED; }
