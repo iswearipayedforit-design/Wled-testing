@@ -2,8 +2,9 @@
 
 #include "wled.h"
 
-// TouchButton: reusable capacitive-touch variant for classic ESP32.
-// GPIO33 is read directly with touchRead(), independent of saved WLED button config.
+// TouchButton: reusable slow-gesture variant for an external capacitive sensor.
+// GPIO33 is read exactly like SmoothButton: active LOW with INPUT_PULLUP,
+// independent of any saved WLED button configuration.
 //
 // Gestures:
 // - first short touch: ON/OFF starts immediately on release (normal WLED fade)
@@ -172,10 +173,9 @@ private:
     schedulePersist();
   }
 
-  // First tap already changed power immediately. A valid second tap therefore
-  // toggles power once more to restore the state that existed before tap #1,
-  // while changing only the white preset. If a fade is still in progress it is
-  // naturally reversed from its current brightness.
+  // Tap #1 already changed power immediately. A valid tap #2 toggles power once
+  // more, restoring the state that existed before tap #1, while changing the
+  // white preset. If a fade is in progress WLED naturally reverses it from briT.
   void completeDoubleClick()
   {
     clickPending = false;
@@ -196,13 +196,7 @@ private:
 
   bool readTouchPressed() const
   {
-#if defined(ARDUINO_ARCH_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32C3)
-    if (digitalPinToTouchChannel(TOUCH_PIN) < 0) return false;
-    const uint8_t threshold = touchThreshold ? touchThreshold : TOUCH_THRESHOLD;
-    return touchRead(TOUCH_PIN) <= threshold;
-#else
-    return false;
-#endif
+    return digitalRead(TOUCH_PIN) == LOW;
   }
 
   void processTouchSample(bool pressed)
@@ -223,8 +217,8 @@ private:
       lastHoldStepMs = now;
       longHandled = false;
 
-      // Measure the 1 s double-click window to the beginning of tap #2. This is
-      // more forgiving for a slow capacitive swipe than measuring to its release.
+      // Measure the 1 s window to the BEGINNING of tap #2. This is much more
+      // forgiving for a slow hand movement over a capacitive sensor.
       secondClickArmed = clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS);
       return;
     }
@@ -255,8 +249,8 @@ private:
       }
     }
 
-    // Single-click action already happened immediately, so expiry only closes
-    // the opportunity for a second tap; it does not delay any visible action.
+    // The single-click action has already happened, so expiry only closes the
+    // double-click opportunity; there is no 1 s visible delay.
     if (clickPending && !stablePressed && (now - firstReleaseMs > DOUBLE_CLICK_MS)) {
       clickPending = false;
       secondClickArmed = false;
@@ -271,6 +265,8 @@ private:
 public:
   void setup() override
   {
+    pinMode(TOUCH_PIN, INPUT_PULLUP);
+
     if (!configLoaded) {
       uint8_t current = (bri > 0) ? bri : briLast;
       if (current == 0) current = 60;
@@ -302,8 +298,8 @@ public:
 
   bool handleButton(uint8_t b) override
   {
-    // TouchButton polls capacitive GPIO33 itself. Consume WLED Button 0 if an
-    // older saved configuration still exists, preventing duplicate actions.
+    // TouchButton polls GPIO33 itself. Consume WLED Button 0 if an older saved
+    // configuration still exists, preventing duplicate button actions.
     return b == 0;
   }
 
@@ -337,8 +333,8 @@ public:
   {
     JsonObject top = root["TouchButton"];
 
-    // Allow a controller previously running Flow/SmoothButton to inherit the
-    // same remembered brightness and color when upgraded to TouchButton.
+    // A controller previously running Flow/SmoothButton can inherit its saved
+    // brightness and color when moved to this variant.
     if (top.isNull()) top = root["FlowButton"];
 
     if (top.isNull()) {
