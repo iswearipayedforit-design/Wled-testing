@@ -36,15 +36,14 @@ jobs:
         run: pip install platformio
 
       - name: Build FlowButton firmware
-        run: pio run -d WLED -e flowbutton
+        run: |
+          pio run -d WLED -e flowbutton
+          cp WLED/build_output/release/WLED_0.15.1_ESP32.bin WLED_0.15.1_ESP32_AudioReactive_FlowButton_OTA.bin
 
       - name: Build SmoothButton firmware
-        run: pio run -d WLED -e smoothbutton
-
-      - name: Prepare OTA firmware files
         run: |
-          cp WLED/.pio/build/flowbutton/firmware.bin WLED_0.15.1_ESP32_AudioReactive_FlowButton_OTA.bin
-          cp WLED/.pio/build/smoothbutton/firmware.bin WLED_0.15.1_ESP32_AudioReactive_SmoothButton_OTA.bin
+          pio run -d WLED -e smoothbutton
+          cp WLED/build_output/release/WLED_0.15.1_ESP32.bin WLED_0.15.1_ESP32_AudioReactive_SmoothButton_OTA.bin
 
       - name: Upload FlowButton OTA firmware
         uses: actions/upload-artifact@v4
