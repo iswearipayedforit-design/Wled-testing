@@ -2,10 +2,9 @@
 
 #include "wled.h"
 
-// FlowButton for the user's 97-LED logical chain.
-// Bus reversing is handled by WLED, so this code works in logical LED order:
-// 0..36  = GPIO2 bus (configured Reversed)
-// 37..96 = GPIO16 bus (normal)
+// One usermod, two build variants:
+// - FlowButton: original 97-LED directional wipe
+// - SmoothButton (FLOWBUTTON_NO_WIPE): normal WLED ON/OFF fade, no LED-count dependency
 class FlowButton : public Usermod {
 private:
   static constexpr uint16_t FLOW_LED_COUNT = 97;
@@ -18,12 +17,12 @@ private:
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
   static constexpr uint8_t WHITE_PRESET_COUNT = 4;
 
-  // Wipe state
-  float progress = 0.0f;              // visible LEDs, 0.0 .. FLOW_LED_COUNT
-  int8_t direction = 0;               // +1 = wipe ON, -1 = wipe OFF, 0 = idle
+  // Wipe state (used only by the FlowButton build).
+  float progress = 0.0f;
+  int8_t direction = 0;
   uint32_t lastAnimMs = 0;
 
-  // Button/debounce/gesture state
+  // Button/debounce/gesture state.
   bool rawPressed = false;
   bool stablePressed = false;
   uint32_t rawChangedMs = 0;
@@ -34,7 +33,7 @@ private:
   bool clickPending = false;
   uint32_t firstReleaseMs = 0;
 
-  // Remembered user settings. lastBrightness is always non-zero.
+  // Remembered user settings.
   uint8_t lastBrightness = 60;
   uint8_t whiteIndex = 2;
   bool configLoaded = false;
@@ -43,10 +42,8 @@ private:
 
   bool initialized = false;
 
-  // These four presets were reconstructed directly from the four WLED screenshots.
-  // Wheel geometry in WLED/iro.js: hue from angle, saturation from radius, value=100%.
-  // The white slider was at 255 in every screenshot.
-  // The CCT slider positions were approximately 0, 0, 64 and 180 on WLED's 0..255 scale.
+  // Four presets reconstructed from the user's WLED screenshots.
+  // RGB = wheel position, W = white slider, CCT = WLED 0..255 balance slider.
   uint8_t whiteCct(uint8_t index) const
   {
     switch (index % WHITE_PRESET_COUNT) {
@@ -70,16 +67,9 @@ private:
   uint32_t whiteColor(uint8_t index) const
   {
     switch (index % WHITE_PRESET_COUNT) {
-      // Screenshot 1: wheel almost full saturation at red/top, W=255, CCT far warm.
       case 0: return RGBW32(255, 27, 26, 255);
-
-      // Screenshot 2: wheel near orange, almost full saturation, W=255, CCT far warm.
       case 1: return RGBW32(255, 146, 28, 255);
-
-      // Screenshot 3: pale warm/orange, low saturation, W=255, CCT ~25%.
       case 2: return RGBW32(255, 213, 176, 255);
-
-      // Screenshot 4: very pale cool blue, very low saturation, W=255, CCT ~70%.
       default: return RGBW32(231, 234, 255, 255);
     }
   }
@@ -101,7 +91,6 @@ private:
       const int dw = (int)W(current) - (int)W(target);
       const int dc = currentCct - (int)whiteCct(i);
 
-      // Compare both wheel/white-slider state and CCT-slider state.
       const uint32_t score =
         (uint32_t)(dr*dr) + (uint32_t)(dg*dg) +
         (uint32_t)(db*db) + (uint32_t)(dw*dw) +
@@ -112,7 +101,6 @@ private:
         best = i;
       }
     }
-
     return best;
   }
 
@@ -124,8 +112,6 @@ private:
 
   void immediateStateUpdate(uint8_t callMode)
   {
-    // Button actions should appear immediately, regardless of WLED's configured
-    // transition time. trigger() also bypasses Solid's normal slow refresh.
     const bool oldFadeTransition = fadeTransition;
     fadeTransition = false;
     stateChanged = true;
@@ -134,23 +120,30 @@ private:
     strip.trigger();
   }
 
-  void applyRememberedWhite()
+  // Set preset values without causing a state update. This is useful for the
+  // SmoothButton ON path: color can be prepared while output is still at 0,
+  // then WLED performs its normal brightness fade from OFF to ON.
+  void setRememberedWhiteRaw()
   {
     const uint8_t cct = whiteCct(whiteIndex);
     const uint32_t color = whiteColor(whiteIndex);
 
-    // Reproduce exactly the controls visible in the screenshots:
-    // wheel RGB + white slider at 255 + CCT slider position.
     for (size_t s = 0; s < strip.getSegmentsNum(); s++) {
       Segment& seg = strip.getSegment(s);
       if (!seg.isActive()) continue;
       seg.setColor(0, color);
       seg.setCCT(cct);
     }
+    stateChanged = true;
+  }
 
+  void applyRememberedWhite()
+  {
+    setRememberedWhiteRaw();
     immediateStateUpdate(CALL_MODE_BUTTON);
   }
 
+#ifndef FLOWBUTTON_NO_WIPE
   void startOrReverse()
   {
     const uint32_t now = millis();
@@ -217,14 +210,34 @@ private:
       return;
     }
 
-    // Force normal animation frames while the wipe is moving.
     strip.trigger();
   }
+#else
+  // SmoothButton single click: use WLED's native brightness transition.
+  // No per-pixel overlay, so it works with any strip length/bus arrangement.
+  void toggleSmooth()
+  {
+    if (bri == 0) {
+      briLast = lastBrightness;
+      setRememberedWhiteRaw();
+      toggleOnOff();               // restores briLast and restarts effect runtime
+    } else {
+      lastBrightness = bri;
+      briLast = lastBrightness;
+      toggleOnOff();               // stores current bri and sets target to 0
+      schedulePersist();
+    }
+
+    // Do NOT disable fadeTransition here. stateUpdated() uses WLED's normal
+    // configured transition time, giving the standard smooth ON/OFF fade.
+    stateUpdated(CALL_MODE_BUTTON);
+  }
+#endif
 
   uint8_t nextBrightnessStep(uint8_t current) const
   {
-    // Raw WLED bri values, NOT percentages.
-    // Closed dimming loop: >60 -> 60 -> 20 -> 5 -> 60 -> ...
+    // Raw WLED bri values, not percentages.
+    // Closed loop: >60 -> 60 -> 20 -> 5 -> 60 -> ...
     if (current > 60) return 60;
     if (current > 20) return 20;
     if (current > 5)  return 5;
@@ -237,8 +250,10 @@ private:
     lastBrightness = nextBrightnessStep(base);
 
     if (bri == 0) {
+#ifndef FLOWBUTTON_NO_WIPE
       progress = (float)FLOW_LED_COUNT;
       direction = 0;
+#endif
       bri = lastBrightness;
       briLast = lastBrightness;
       applyRememberedWhite();
@@ -263,7 +278,6 @@ private:
   {
     const uint32_t now = millis();
 
-    // Long press: first brightness step at 600 ms, then one step every second.
     if (stablePressed) {
       if (!longHandled && (now - pressStartedMs >= LONG_PRESS_MS)) {
         longHandled = true;
@@ -276,10 +290,13 @@ private:
       }
     }
 
-    // Wait 600 ms before accepting a single click so a slower double click is safe.
     if (clickPending && !stablePressed && (now - firstReleaseMs > DOUBLE_CLICK_MS)) {
       clickPending = false;
+#ifndef FLOWBUTTON_NO_WIPE
       startOrReverse();
+#else
+      toggleSmooth();
+#endif
     }
 
     if (persistPending && (int32_t)(now - persistAfterMs) >= 0 && !strip.isUpdating()) {
@@ -305,7 +322,9 @@ public:
     if (bri > 0) bri = lastBrightness;
     applyRememberedWhite();
 
+#ifndef FLOWBUTTON_NO_WIPE
     progress = (bri > 0) ? (float)FLOW_LED_COUNT : 0.0f;
+#endif
     rawPressed = false;
     stablePressed = false;
     rawChangedMs = millis();
@@ -317,12 +336,12 @@ public:
   void loop() override
   {
     if (!initialized) return;
+#ifndef FLOWBUTTON_NO_WIPE
     updateAnimation();
+#endif
     handleGestureTimers();
   }
 
-  // Intercept WLED button 0 completely. We implement debounce, short click,
-  // double click and hold ourselves so the gestures cannot conflict.
   bool handleButton(uint8_t b) override
   {
     if (!initialized || b != 0 || btnPin[b] < 0 || buttonType[b] == BTN_TYPE_NONE) return false;
@@ -342,15 +361,13 @@ public:
         pressStartedMs = now;
         lastHoldStepMs = now;
         longHandled = false;
-      } else {
-        if (!longHandled) {
-          if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
-            clickPending = false;
-            cycleWhite();
-          } else {
-            clickPending = true;
-            firstReleaseMs = now;
-          }
+      } else if (!longHandled) {
+        if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
+          clickPending = false;
+          cycleWhite();
+        } else {
+          clickPending = true;
+          firstReleaseMs = now;
         }
       }
     }
@@ -358,10 +375,9 @@ public:
     return true;
   }
 
-  // WLED renders the current effect normally; this overlay masks the portion
-  // that has not yet been reached by the wipe.
   void handleOverlayDraw() override
   {
+#ifndef FLOWBUTTON_NO_WIPE
     if (!initialized) return;
 
     float p = progress;
@@ -386,10 +402,9 @@ public:
     for (uint16_t i = firstHidden; i < FLOW_LED_COUNT; i++) {
       strip.setPixelColor(i, 0);
     }
+#endif
   }
 
-  // Learn brightness and whichever of the four presets is nearest to a manual
-  // WLED UI state, so button control remains in sync with the UI.
   void onStateChange(uint8_t mode) override
   {
     if (!initialized) return;
@@ -443,14 +458,19 @@ public:
     JsonObject user = root["u"];
     if (user.isNull()) user = root.createNestedObject("u");
 
+#ifdef FLOWBUTTON_NO_WIPE
+    JsonArray stateInfo = user.createNestedArray("SmoothButton");
+    stateInfo.add(bri > 0 ? "ON" : "OFF");
+#else
     JsonArray stateInfo = user.createNestedArray("FlowButton");
     stateInfo.add(direction > 0 ? "Wipe ON" : direction < 0 ? "Wipe OFF" : progress > 0.0f ? "ON" : "OFF");
+#endif
 
-    JsonArray briInfo = user.createNestedArray("Flow brightness");
+    JsonArray briInfo = user.createNestedArray("Button brightness");
     briInfo.add(lastBrightness);
     briInfo.add(" / 255");
 
-    JsonArray whiteInfo = user.createNestedArray("Flow white");
+    JsonArray whiteInfo = user.createNestedArray("Button white");
     whiteInfo.add(whiteName(whiteIndex));
     whiteInfo.add(" / CCT ");
     whiteInfo.add(whiteCct(whiteIndex));
