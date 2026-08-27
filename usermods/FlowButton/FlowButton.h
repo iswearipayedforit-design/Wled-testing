@@ -17,6 +17,13 @@ private:
   static constexpr uint16_t PERSIST_DELAY_MS = 1800;
   static constexpr uint8_t WHITE_PRESET_COUNT = 4;
 
+#ifdef FLOWBUTTON_NO_WIPE
+  // SmoothButton deliberately owns GPIO33 directly. This avoids inheriting a
+  // stale/foreign WLED button configuration when the firmware is installed OTA
+  // on another controller. Wiring is GPIO33 -> momentary button -> GND.
+  static constexpr uint8_t SMOOTH_BUTTON_PIN = 33;
+#endif
+
   // Wipe state (used only by the FlowButton build).
   float progress = 0.0f;
   int8_t direction = 0;
@@ -42,8 +49,6 @@ private:
 
   bool initialized = false;
 
-  // Four presets reconstructed from the user's WLED screenshots.
-  // RGB = wheel position, W = white slider, CCT = WLED 0..255 balance slider.
   uint8_t whiteCct(uint8_t index) const
   {
     switch (index % WHITE_PRESET_COUNT) {
@@ -120,9 +125,6 @@ private:
     strip.trigger();
   }
 
-  // Set preset values without causing a state update. This is useful for the
-  // SmoothButton ON path: color can be prepared while output is still at 0,
-  // then WLED performs its normal brightness fade from OFF to ON.
   void setRememberedWhiteRaw()
   {
     const uint8_t cct = whiteCct(whiteIndex);
@@ -213,31 +215,26 @@ private:
     strip.trigger();
   }
 #else
-  // SmoothButton single click: use WLED's native brightness transition.
-  // No per-pixel overlay, so it works with any strip length/bus arrangement.
   void toggleSmooth()
   {
     if (bri == 0) {
       briLast = lastBrightness;
       setRememberedWhiteRaw();
-      toggleOnOff();               // restores briLast and restarts effect runtime
+      toggleOnOff();
     } else {
       lastBrightness = bri;
       briLast = lastBrightness;
-      toggleOnOff();               // stores current bri and sets target to 0
+      toggleOnOff();
       schedulePersist();
     }
 
-    // Do NOT disable fadeTransition here. stateUpdated() uses WLED's normal
-    // configured transition time, giving the standard smooth ON/OFF fade.
+    // Keep the normal WLED transition enabled for a natural short fade.
     stateUpdated(CALL_MODE_BUTTON);
   }
 #endif
 
   uint8_t nextBrightnessStep(uint8_t current) const
   {
-    // Raw WLED bri values, not percentages.
-    // Closed loop: >60 -> 60 -> 20 -> 5 -> 60 -> ...
     if (current > 60) return 60;
     if (current > 20) return 20;
     if (current > 5)  return 5;
@@ -274,6 +271,44 @@ private:
     schedulePersist();
   }
 
+  // Shared debounced state machine. The input itself can come from WLED's
+  // button manager (FlowButton) or directly from GPIO33 (SmoothButton).
+  void processButtonSample(bool pressed)
+  {
+    const uint32_t now = millis();
+
+    if (pressed != rawPressed) {
+      rawPressed = pressed;
+      rawChangedMs = now;
+    }
+
+    if ((now - rawChangedMs) >= DEBOUNCE_MS && stablePressed != rawPressed) {
+      stablePressed = rawPressed;
+
+      if (stablePressed) {
+        pressStartedMs = now;
+        lastHoldStepMs = now;
+        longHandled = false;
+      } else if (!longHandled) {
+        if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
+          clickPending = false;
+          cycleWhite();
+        } else {
+          clickPending = true;
+          firstReleaseMs = now;
+        }
+      }
+    }
+  }
+
+#ifdef FLOWBUTTON_NO_WIPE
+  void pollSmoothButton()
+  {
+    // Active-low momentary button with internal pull-up.
+    processButtonSample(digitalRead(SMOOTH_BUTTON_PIN) == LOW);
+  }
+#endif
+
   void handleGestureTimers()
   {
     const uint32_t now = millis();
@@ -308,6 +343,10 @@ private:
 public:
   void setup() override
   {
+#ifdef FLOWBUTTON_NO_WIPE
+    pinMode(SMOOTH_BUTTON_PIN, INPUT_PULLUP);
+#endif
+
     if (!configLoaded) {
       uint8_t current = (bri > 0) ? bri : briLast;
       if (current == 0) current = 60;
@@ -325,8 +364,16 @@ public:
 #ifndef FLOWBUTTON_NO_WIPE
     progress = (bri > 0) ? (float)FLOW_LED_COUNT : 0.0f;
 #endif
+
+#ifdef FLOWBUTTON_NO_WIPE
+    // Start from the actual electrical input level so a floating/stale WLED
+    // button state cannot create a phantom long press after boot.
+    rawPressed = (digitalRead(SMOOTH_BUTTON_PIN) == LOW);
+    stablePressed = rawPressed;
+#else
     rawPressed = false;
     stablePressed = false;
+#endif
     rawChangedMs = millis();
     initialized = true;
 
@@ -338,41 +385,24 @@ public:
     if (!initialized) return;
 #ifndef FLOWBUTTON_NO_WIPE
     updateAnimation();
+#else
+    pollSmoothButton();
 #endif
     handleGestureTimers();
   }
 
   bool handleButton(uint8_t b) override
   {
+#ifdef FLOWBUTTON_NO_WIPE
+    // SmoothButton samples GPIO33 directly in loop(). If WLED happens to have a
+    // saved Button 0 configuration too, consume it here so its normal actions do
+    // not run in parallel with our gesture handler.
+    return b == 0;
+#else
     if (!initialized || b != 0 || btnPin[b] < 0 || buttonType[b] == BTN_TYPE_NONE) return false;
-
-    const uint32_t now = millis();
-    const bool pressed = isButtonPressed(b);
-
-    if (pressed != rawPressed) {
-      rawPressed = pressed;
-      rawChangedMs = now;
-    }
-
-    if ((now - rawChangedMs) >= DEBOUNCE_MS && stablePressed != rawPressed) {
-      stablePressed = rawPressed;
-
-      if (stablePressed) {
-        pressStartedMs = now;
-        lastHoldStepMs = now;
-        longHandled = false;
-      } else if (!longHandled) {
-        if (clickPending && (now - firstReleaseMs <= DOUBLE_CLICK_MS)) {
-          clickPending = false;
-          cycleWhite();
-        } else {
-          clickPending = true;
-          firstReleaseMs = now;
-        }
-      }
-    }
-
+    processButtonSample(isButtonPressed(b));
     return true;
+#endif
   }
 
   void handleOverlayDraw() override
