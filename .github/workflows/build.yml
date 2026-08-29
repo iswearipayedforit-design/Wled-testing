@@ -50,6 +50,39 @@ jobs:
           pio run -d WLED -e touchbutton
           cp WLED/build_output/release/WLED_0.15.1_ESP32.bin WLED_0.15.1_ESP32_AudioReactive_TouchButton_1s_OTA.bin
 
+      - name: Prepare SmoothButton 60-120-255 brightness variant
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('WLED/usermods/SmoothButton/SmoothButton.h')
+          source = path.read_text(encoding='utf-8')
+          old = '''  uint8_t nextBrightnessStep(uint8_t current) const
+            {
+              if (current > 60) return 60;
+              if (current > 20) return 20;
+              if (current > 5) return 5;
+              return 60;
+            }
+          '''
+          new = '''  uint8_t nextBrightnessStep(uint8_t current) const
+            {
+              if (current < 60) return 60;
+              if (current < 120) return 120;
+              if (current < 255) return 255;
+              return 60;
+            }
+          '''
+          if old not in source:
+              raise SystemExit('SmoothButton brightness function not found')
+          path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Build SmoothButton 60-120-255 firmware
+        run: |
+          pio run -d WLED -e smoothbutton_high
+          cp WLED/build_output/release/WLED_0.15.1_ESP32.bin WLED_0.15.1_ESP32_AudioReactive_SmoothButton_60-120-255_OTA.bin
+
       - name: Upload FlowButton OTA firmware
         uses: actions/upload-artifact@v4
         with:
@@ -71,5 +104,13 @@ jobs:
         with:
           name: WLED_0.15.1_ESP32_AudioReactive_TouchButton_1s_OTA
           path: WLED_0.15.1_ESP32_AudioReactive_TouchButton_1s_OTA.bin
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload SmoothButton 60-120-255 OTA firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: WLED_0.15.1_ESP32_AudioReactive_SmoothButton_60-120-255_OTA
+          path: WLED_0.15.1_ESP32_AudioReactive_SmoothButton_60-120-255_OTA.bin
           if-no-files-found: error
           retention-days: 30
