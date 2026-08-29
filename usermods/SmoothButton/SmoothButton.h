@@ -2,8 +2,8 @@
 
 #include "wled.h"
 
-// SmoothButton: reusable GPIO33 button variant with immediate single-click response.
-// Electrical input is active LOW: GPIO33 -> button/sensor output -> GND logic.
+// SmoothButton: reusable Button 0 variant with immediate single-click response.
+// The physical GPIO and button type come from WLED Config -> LED Preferences -> Button 0.
 //
 // Gestures:
 // - first short click: ON/OFF starts immediately on release (normal WLED fade)
@@ -11,7 +11,6 @@
 // - hold: brightness 60 -> 20 -> 5 -> 60 ... (raw WLED bri values)
 class SmoothButton : public Usermod {
 private:
-  static constexpr uint8_t BUTTON_PIN = 33;
   static constexpr uint16_t DEBOUNCE_MS = 50;
   static constexpr uint16_t DOUBLE_CLICK_MS = 600;
   static constexpr uint16_t LONG_PRESS_MS = 600;
@@ -36,6 +35,16 @@ private:
   bool persistPending = false;
   uint32_t persistAfterMs = 0;
   bool initialized = false;
+
+  bool buttonConfigured() const
+  {
+    return btnPin[0] >= 0 && buttonType[0] != BTN_TYPE_NONE;
+  }
+
+  bool readConfiguredButton() const
+  {
+    return buttonConfigured() && isButtonPressed(0);
+  }
 
   uint8_t whiteCct(uint8_t index) const
   {
@@ -257,8 +266,6 @@ private:
 public:
   void setup() override
   {
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
-
     if (!configLoaded) {
       uint8_t current = (bri > 0) ? bri : briLast;
       if (current == 0) current = 60;
@@ -273,7 +280,7 @@ public:
     if (bri > 0) bri = lastBrightness;
     setRememberedWhiteRaw();
 
-    rawPressed = (digitalRead(BUTTON_PIN) == LOW);
+    rawPressed = readConfiguredButton();
     stablePressed = rawPressed;
     rawChangedMs = millis();
     initialized = true;
@@ -284,15 +291,16 @@ public:
   void loop() override
   {
     if (!initialized) return;
-    processButtonSample(digitalRead(BUTTON_PIN) == LOW);
+    processButtonSample(readConfiguredButton());
     handleTimers();
   }
 
   bool handleButton(uint8_t b) override
   {
-    // We own GPIO33 directly. Consume WLED Button 0 if a saved configuration
-    // still exists so WLED does not run its default action in parallel.
-    return b == 0;
+    // Gesture handling is done in loop(), but consume WLED Button 0 so the
+    // stock WLED short/long/double actions do not run in parallel.
+    if (b != 0 || !buttonConfigured()) return false;
+    return true;
   }
 
   void onStateChange(uint8_t mode) override
@@ -354,6 +362,10 @@ public:
 
     JsonArray stateInfo = user.createNestedArray("SmoothButton");
     stateInfo.add(bri > 0 ? "ON" : "OFF");
+
+    JsonArray pinInfo = user.createNestedArray("Smooth Button 0 GPIO");
+    if (buttonConfigured()) pinInfo.add(btnPin[0]);
+    else pinInfo.add("disabled");
 
     JsonArray windowInfo = user.createNestedArray("Smooth double window");
     windowInfo.add(DOUBLE_CLICK_MS);
