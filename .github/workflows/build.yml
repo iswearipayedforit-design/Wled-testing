@@ -54,28 +54,22 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('WLED/usermods/SmoothButton/SmoothButton.h')
           source = path.read_text(encoding='utf-8')
-          old = '''  uint8_t nextBrightnessStep(uint8_t current) const
-            {
-              if (current > 60) return 60;
-              if (current > 20) return 20;
-              if (current > 5) return 5;
-              return 60;
-            }
-          '''
-          new = '''  uint8_t nextBrightnessStep(uint8_t current) const
-            {
-              if (current < 60) return 60;
-              if (current < 120) return 120;
-              if (current < 255) return 255;
-              return 60;
-            }
-          '''
-          if old not in source:
+          pattern = r'uint8_t nextBrightnessStep\(uint8_t current\) const\s*\{[^}]*\}'
+          replacement = '''uint8_t nextBrightnessStep(uint8_t current) const
+          {
+            if (current < 60) return 60;
+            if (current < 120) return 120;
+            if (current < 255) return 255;
+            return 60;
+          }'''
+          source, count = re.subn(pattern, replacement, source, count=1)
+          if count != 1:
               raise SystemExit('SmoothButton brightness function not found')
-          path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          path.write_text(source, encoding='utf-8')
           PY
 
       - name: Build SmoothButton 60-120-255 firmware
